@@ -20,7 +20,7 @@ build() {
 }
 
 package() {
-	export DIR_TERMUX="/data/data/com.termux"
+	export DIR_TERMUX="/data/data/org.cosmicide/files"
 	export CGCT_PATH="${DIR_TERMUX}/cgct"
 
 	for target in arm64 arm x86; do

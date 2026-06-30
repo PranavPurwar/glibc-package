@@ -2,8 +2,8 @@
 
 # system definitions
 export LANG="en_US.UTF-8"
-export DIR_TERMUX="/data/data/com.termux"
-export TERMUX_PREFIX="${DIR_TERMUX}/files/usr"
+export DIR_TERMUX="/data/data/org.cosmicide"
+export TERMUX_PREFIX="${DIR_TERMUX}/files"
 export GLIBC_PREFIX="${TERMUX_PREFIX}/glibc"
 export CGCT_PATH="${DIR_TERMUX}/cgct"
 export SERVER_URL="https://sync.termux-pacman.dev"
