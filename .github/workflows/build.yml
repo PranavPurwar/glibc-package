@@ -46,6 +46,8 @@ jobs:
 
       - name: Gather build summary
         run: |
+          TARGET_PKGS="glibc coreutils bash ncurses libarchive liblzma ca-certificates libgpg-error libidn2 libssh2 libnghttp2 libseccomp libsqlite libgcrypt libcurl"
+
           mkdir -p ./artifacts ./pkgs
           touch ./pkgs/.placeholder
 
@@ -87,30 +89,34 @@ jobs:
                 if [[ $file =~ ^${repo_path}/([.a-z0-9+-]*)/([.a-z0-9+-]*).subpackage.sh$ ]]; then
                   pkg=${BASH_REMATCH[1]}
                   subpkg=${BASH_REMATCH[2]}
-                  if [ ! -f "${repo_path}/${pkg}/${subpkg}.subpackage.sh" ]; then
-                    echo "$subpkg" >> ./deleted_${repo}_packages.txt
+                  if grep -qw "$pkg" <<< "$TARGET_PKGS"; then
+                    if [ ! -f "${repo_path}/${pkg}/${subpkg}.subpackage.sh" ]; then
+                      echo "$subpkg" >> ./deleted_${repo}_packages.txt
+                    fi
                   fi
                 elif [[ $file =~ ^${repo_path}/([.a-z0-9+-]*)/.*$ ]]; then
                   pkg=${BASH_REMATCH[1]}
-                  if [ -d "${repo_path}/${pkg}" ]; then
-                    echo "$pkg" >> ./built_${repo}_packages.txt
-                    for subfile in $(find "${repo_path}/${pkg}/" -maxdepth 1 -type f -name \*.subpackage.sh | sort); do
-                      echo "$(basename "${subfile%%.subpackage.sh}")" >> ./built_${repo}_subpackages.txt
-                    done
-                  else
-                    echo "$pkg" >> ./deleted_${repo}_packages.txt
+                  if grep -qw "$pkg" <<< "$TARGET_PKGS"; then
+                    if [ -d "${repo_path}/${pkg}" ]; then
+                      echo "$pkg" >> ./built_${repo}_packages.txt
+                      for subfile in $(find "${repo_path}/${pkg}/" -maxdepth 1 -type f -name \*.subpackage.sh | sort); do
+                        echo "$(basename "${subfile%%.subpackage.sh}")" >> ./built_${repo}_subpackages.txt
+                      done
+                    else
+                      echo "$pkg" >> ./deleted_${repo}_packages.txt
+                    fi
                   fi
                 fi
               done <<< "${CHANGED_FILES}"
             done
           else
-            for repo_path in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
-              repo=$(jq --raw-output '.["'${repo_path}'"].name' repo.json)
-              for pkgdir in "${repo_path}"/*; do
-                if [ -d "$pkgdir" ]; then
-                  pkg=$(basename "$pkgdir")
+            for pkg in $TARGET_PKGS; do
+              repo_paths=$(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json)
+              for repo_path in $repo_paths; do
+                repo=$(jq --raw-output '.["'${repo_path}'"].name' repo.json)
+                if [ -d "${repo_path}/${pkg}" ]; then
                   echo "$pkg" >> ./built_${repo}_packages.txt
-                  for subpkg in $(find "${pkgdir}/" -maxdepth 1 -type f -name \*.subpackage.sh | sort); do
+                  for subpkg in $(find "${repo_path}/${pkg}/" -maxdepth 1 -type f -name \*.subpackage.sh | sort); do
                     echo "$(basename "${subpkg%%.subpackage.sh}")" >> ./built_${repo}_subpackages.txt
                   done
                 fi
@@ -289,45 +295,34 @@ jobs:
             shopt -u nullglob
 
             if [[ "$db_updated" = true ]] || [[ -f "pkgs/$dp_file" && -f "$REPO_DIR/${repo}.db.tar.gz" ]]; then
-              python3 -c '
-              import os, sys, tarfile, json
-
-              repo_dir = sys.argv[1]
-              repo = sys.argv[2]
-              db_path = os.path.join(repo_dir, f"{repo}.db.tar.gz")
-              out_json = os.path.join(repo_dir, f"{repo}.json")
-              repo_data = {}
-
-              if os.path.exists(db_path):
-                  with tarfile.open(db_path, "r:gz") as tar:
-                      for member in tar.getmembers():
-                          if member.name.endswith("/desc"):
-                              f = tar.extractfile(member)
-                              if not f:
-                                  continue
-                              content = f.read().decode("utf-8", errors="ignore").splitlines()
-                              pkg = {}
-                              key = None
-                              for line in content:
-                                  line = line.strip()
-                                  if line.startswith("%") and line.endswith("%"):
-                                      key = line[1:-1]
-                                      pkg[key] = []
-                                  elif line and key:
-                                      pkg[key].append(line)
-
-                              name = pkg.get("NAME", [""])[0]
-                              if name:
-                                  entry = {}
-                                  for k, v in pkg.items():
-                                      if k == "NAME":
-                                          continue
-                                      entry[k] = v[0] if len(v) == 1 else v
-                                  repo_data[name] = entry
-
-              with open(out_json, "w", encoding="utf-8") as jf:
-                  json.dump(repo_data, jf, indent=2)
-              ' "$REPO_DIR" "${repo}"
+              python3 -c 'import sys, textwrap; exec(textwrap.dedent("""
+                import os, sys, tarfile, json
+                repo_dir, repo = sys.argv[1], sys.argv[2]
+                db_path = os.path.join(repo_dir, f"{repo}.db.tar.gz")
+                out_json = os.path.join(repo_dir, f"{repo}.json")
+                repo_data = {}
+                if os.path.exists(db_path):
+                    with tarfile.open(db_path, "r:gz") as tar:
+                        for m in tar.getmembers():
+                            if m.name.endswith("/desc"):
+                                f = tar.extractfile(m)
+                                if not f:
+                                    continue
+                                content = f.read().decode("utf-8", "ignore").splitlines()
+                                pkg, key = {}, None
+                                for line in content:
+                                    line = line.strip()
+                                    if line.startswith("%") and line.endswith("%"):
+                                        key = line[1:-1]
+                                        pkg[key] = []
+                                    elif line and key:
+                                        pkg[key].append(line)
+                                name = pkg.get("NAME", [""])[0]
+                                if name:
+                                    repo_data[name] = {k: (v[0] if len(v) == 1 else v) for k, v in pkg.items() if k != "NAME"}
+                with open(out_json, "w", encoding="utf-8") as jf:
+                    json.dump(repo_data, jf, indent=2)
+              """))' "$REPO_DIR" "${repo}"
 
               aws s3 cp "$REPO_DIR/${repo}.db.tar.gz" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.arch }}/${repo}.db.tar.gz"
               aws s3 cp "$REPO_DIR/${repo}.files.tar.gz" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.arch }}/${repo}.files.tar.gz"
