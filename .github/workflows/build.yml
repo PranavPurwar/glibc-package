@@ -174,7 +174,7 @@ jobs:
             test -f ./deleted_${repo}_packages.txt && mv ./deleted_${repo}_packages.txt ./pkgs/
 
             while read -r pkg; do
-              find output \( -name "$pkg_*.pkg.*" -o -name "$pkg-static_*.pkg.*" \) -type f -print0 | xargs -0r mv -t pkgs/
+              find output \( -name "${pkg}-*.pkg.*" -o -name "${pkg}_*.pkg.*" -o -name "${pkg}*.pkg.*" \) -type f -print0 | xargs -0r mv -t pkgs/
             done < <(cat ./pkgs/built_${repo}_packages.txt)
           done
 
