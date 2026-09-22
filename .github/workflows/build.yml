@@ -46,7 +46,7 @@ jobs:
 
       - name: Gather build summary
         run: |
-          TARGET_PKGS="glibc coreutils bash ncurses libarchive liblzma ca-certificates libgpg-error libidn2 libssh2 libnghttp2 libseccomp libsqlite libgcrypt libcurl"
+          TARGET_PKGS="glibc coreutils bash ncurses libarchive liblzma ca-certificates libgpg-error libidn2 libssh2 libnghttp2 libseccomp libsqlite libgcrypt libcurl linux-api-headers"
 
           mkdir -p ./artifacts ./pkgs
           touch ./pkgs/.placeholder
