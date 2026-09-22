@@ -10,10 +10,6 @@ on:
     paths:
       - 'gpkg/**'
   workflow_dispatch:
-    inputs:
-      packages:
-        description: "A space-separated names of packages selected for rebuilding"
-        required: true
 
 permissions: {}
 
@@ -50,7 +46,12 @@ jobs:
 
       - name: Gather build summary
         run: |
-          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+          TARGET_PKGS="glibc coreutils bash ncurses libarchive liblzma ca-certificates libgpg-error libidn2 libssh2 libnghttp2 libseccomp libsqlite libgcrypt libcurl"
+
+          mkdir -p ./artifacts ./pkgs
+          touch ./pkgs/.placeholder
+
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE_COMMIT=$(jq --raw-output .pull_request.base.sha "$GITHUB_EVENT_PATH")
             OLD_COMMIT=$(jq --raw-output .commits[0].id "$GITHUB_EVENT_PATH")
             HEAD_COMMIT=$(jq --raw-output .commits[-1].id "$GITHUB_EVENT_PATH")
@@ -67,11 +68,7 @@ jobs:
               echo "Processing pull request #$(jq --raw-output .pull_request.number "$GITHUB_EVENT_PATH"): ${BASE_COMMIT}..HEAD"
               CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r "${BASE_COMMIT}" "HEAD")
             fi
-          fi
-          mkdir -p ./artifacts ./pkgs
-          touch ./pkgs/.placeholder
 
-          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
             if grep -qiP '^\s*%ci:no-build\s*$' <(git log --format="%B" -n 1 "HEAD"); then
               tar cf artifacts/pkgs-${{ matrix.target_arch }}.tar pkgs
               echo "[!] Force exiting as tag '%ci:no-build' was applied to HEAD commit message."
@@ -92,24 +89,28 @@ jobs:
                 if [[ $file =~ ^${repo_path}/([.a-z0-9+-]*)/([.a-z0-9+-]*).subpackage.sh$ ]]; then
                   pkg=${BASH_REMATCH[1]}
                   subpkg=${BASH_REMATCH[2]}
-                  if [ ! -f "${repo_path}/${pkg}/${subpkg}.subpackage.sh" ]; then
-                    echo "$subpkg" >> ./deleted_${repo}_packages.txt
+                  if grep -qw "$pkg" <<< "$TARGET_PKGS"; then
+                    if [ ! -f "${repo_path}/${pkg}/${subpkg}.subpackage.sh" ]; then
+                      echo "$subpkg" >> ./deleted_${repo}_packages.txt
+                    fi
                   fi
                 elif [[ $file =~ ^${repo_path}/([.a-z0-9+-]*)/.*$ ]]; then
                   pkg=${BASH_REMATCH[1]}
-                  if [ -d "${repo_path}/${pkg}" ]; then
-                    echo "$pkg" >> ./built_${repo}_packages.txt
-                    for file in $(find "${repo_path}/${pkg}/" -maxdepth 1 -type f -name \*.subpackage.sh | sort); do
-                      echo "$(basename "${file%%.subpackage.sh}")" >> ./built_${repo}_subpackages.txt
-                    done
-                  else
-                    echo "$pkg" >> ./deleted_${repo}_packages.txt
+                  if grep -qw "$pkg" <<< "$TARGET_PKGS"; then
+                    if [ -d "${repo_path}/${pkg}" ]; then
+                      echo "$pkg" >> ./built_${repo}_packages.txt
+                      for subfile in $(find "${repo_path}/${pkg}/" -maxdepth 1 -type f -name \*.subpackage.sh | sort); do
+                        echo "$(basename "${subfile%%.subpackage.sh}")" >> ./built_${repo}_subpackages.txt
+                      done
+                    else
+                      echo "$pkg" >> ./deleted_${repo}_packages.txt
+                    fi
                   fi
                 fi
-              done<<<${CHANGED_FILES}
+              done <<< "${CHANGED_FILES}"
             done
           else
-            for pkg in ${{ github.event.inputs.packages }}; do
+            for pkg in $TARGET_PKGS; do
               repo_paths=$(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json)
               found=false
               for repo_path in $repo_paths; do
@@ -122,10 +123,6 @@ jobs:
                   done
                 fi
               done
-              if [ "$found" != true ]; then
-                echo "Package '${pkg}' not found in any of the repo"
-                exit 1
-              fi
             done
           fi
 
@@ -149,7 +146,6 @@ jobs:
           declare -a packages
           for repo_path in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
             repo=$(jq --raw-output '.["'${repo_path}'"].name' repo.json)
-
             if [ -f ./built_${repo}_packages.txt ]; then
               packages="$packages $(cat ./built_${repo}_packages.txt)"
             fi
@@ -268,9 +264,33 @@ jobs:
             db_updated=false
             shopt -s nullglob
             for list_pkg in pkgs/*.pkg.*; do
-              aws s3 cp "$list_pkg" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.arch }}/${list_pkg##*/}"
+              PKG_BASENAME="${list_pkg##*/}"
+              PKG_PATH="$REPO_DIR/$PKG_BASENAME"
               cp -f "$list_pkg" "$REPO_DIR/"
-              repo-add -R "$REPO_DIR/${repo}.db.tar.gz" "$REPO_DIR/${list_pkg##*/}"
+
+              if ! tar -tf "$PKG_PATH" | grep -q '^\.PKGINFO$'; then
+                TMP_DIR=$(mktemp -d)
+                RAW_NAME=$(basename "$PKG_BASENAME" .pkg.tar.xz)
+                RAW_NAME=$(basename "$RAW_NAME" .pkg.tar.zst)
+                PKG_ARCH="${RAW_NAME##*-}"
+                REM="${RAW_NAME%-*}"
+                PKG_REL="${REM##*-}"
+                REM="${REM%-*}"
+                PKG_VER="${REM##*-}"
+                PKG_NAME="${REM%-*}"
+
+                printf "pkgname = %s\npkgver = %s-%s\npkgdesc = %s package for Termux glibc\narch = %s\nsize = %s\nbuilddate = %s\npackager = GitHubActions\n" \
+                  "$PKG_NAME" "$PKG_VER" "$PKG_REL" "$PKG_NAME" "$PKG_ARCH" "$(stat -c%s "$PKG_PATH")" "$(date +%s)" > "$TMP_DIR/.PKGINFO"
+
+                EXTRACT_DIR=$(mktemp -d)
+                tar -xf "$PKG_PATH" -C "$EXTRACT_DIR"
+                cp "$TMP_DIR/.PKGINFO" "$EXTRACT_DIR/.PKGINFO"
+                tar -cJf "$PKG_PATH" -C "$EXTRACT_DIR" .
+                rm -rf "$TMP_DIR" "$EXTRACT_DIR"
+              fi
+
+              aws s3 cp "$PKG_PATH" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.arch }}/$PKG_BASENAME"
+              repo-add -R "$REPO_DIR/${repo}.db.tar.gz" "$PKG_PATH"
               db_updated=true
             done
             shopt -u nullglob
