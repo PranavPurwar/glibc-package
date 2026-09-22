@@ -268,28 +268,35 @@ jobs:
               PKG_PATH="$REPO_DIR/$PKG_BASENAME"
               cp -f "$list_pkg" "$REPO_DIR/"
 
-              if ! tar -tf "$PKG_PATH" | grep -q '^\.PKGINFO$'; then
-                TMP_DIR=$(mktemp -d)
-                RAW_NAME=$(basename "$PKG_BASENAME" .pkg.tar.xz)
-                RAW_NAME=$(basename "$RAW_NAME" .pkg.tar.zst)
-                PKG_ARCH="${RAW_NAME##*-}"
-                REM="${RAW_NAME%-*}"
-                PKG_REL="${REM##*-}"
-                REM="${REM%-*}"
-                PKG_VER="${REM##*-}"
-                PKG_NAME="${REM%-*}"
-
-                printf "pkgname = %s\npkgver = %s-%s\npkgdesc = %s package for Termux glibc\narch = %s\nsize = %s\nbuilddate = %s\npackager = GitHubActions\n" \
-                  "$PKG_NAME" "$PKG_VER" "$PKG_REL" "$PKG_NAME" "$PKG_ARCH" "$(stat -c%s "$PKG_PATH")" "$(date +%s)" > "$TMP_DIR/.PKGINFO"
-
+              # Check if .PKGINFO is strictly at root (not ./.PKGINFO)
+              if ! bsdtar -tf "$PKG_PATH" 2>/dev/null | grep -E '^(\./)?\.PKGINFO$' | grep -q '^\.PKGINFO$'; then
+                echo "[*] Fixing .PKGINFO entry for $PKG_BASENAME..."
                 EXTRACT_DIR=$(mktemp -d)
-                tar -xf "$PKG_PATH" -C "$EXTRACT_DIR"
-                cp "$TMP_DIR/.PKGINFO" "$EXTRACT_DIR/.PKGINFO"
-                tar -cJf "$PKG_PATH" -C "$EXTRACT_DIR" .
-                rm -rf "$TMP_DIR" "$EXTRACT_DIR"
+                bsdtar -xf "$PKG_PATH" -C "$EXTRACT_DIR"
+
+                # If .PKGINFO didn't exist at all, generate it
+                if [ ! -f "$EXTRACT_DIR/.PKGINFO" ]; then
+                  RAW_NAME=$(basename "$PKG_BASENAME" .pkg.tar.xz)
+                  RAW_NAME=$(basename "$RAW_NAME" .pkg.tar.zst)
+                  PKG_ARCH="${RAW_NAME##*-}"
+                  REM="${RAW_NAME%-*}"
+                  PKG_REL="${REM##*-}"
+                  REM="${REM%-*}"
+                  PKG_VER="${REM##*-}"
+                  PKG_NAME="${REM%-*}"
+
+                  printf "pkgname = %s\npkgver = %s-%s\npkgdesc = %s package\narch = %s\nsize = %s\nbuilddate = %s\npackager = GitHubActions\n" \
+                    "$PKG_NAME" "$PKG_VER" "$PKG_REL" "$PKG_NAME" "$PKG_ARCH" "$(stat -c%s "$PKG_PATH")" "$(date +%s)" > "$EXTRACT_DIR/.PKGINFO"
+                fi
+
+                # Repack using bsdtar without leading './'
+                ( cd "$EXTRACT_DIR" && bsdtar -cf - * .PKGINFO 2>/dev/null || bsdtar -cf - * ) | xz -c > "$PKG_PATH"
+                rm -rf "$EXTRACT_DIR"
               fi
 
               aws s3 cp "$PKG_PATH" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.arch }}/$PKG_BASENAME"
+              
+              # Run repo-add with absolute path
               repo-add -R "$REPO_DIR/${repo}.db.tar.gz" "$PKG_PATH"
               db_updated=true
             done
