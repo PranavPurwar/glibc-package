@@ -46,80 +46,20 @@ jobs:
           mkdir -p ./artifacts ./pkgs
           touch ./pkgs/.placeholder
 
-          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE_COMMIT=$(jq --raw-output .pull_request.base.sha "$GITHUB_EVENT_PATH")
-            OLD_COMMIT=$(jq --raw-output .commits[0].id "$GITHUB_EVENT_PATH")
-            HEAD_COMMIT=$(jq --raw-output .commits[-1].id "$GITHUB_EVENT_PATH")
-            if [ "$BASE_COMMIT" = "null" ]; then
-              if [ "$OLD_COMMIT" = "$HEAD_COMMIT" ]; then
-                echo "Processing commit: ${HEAD_COMMIT}"
-                CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r "${HEAD_COMMIT}")
-              else
-                OLD_COMMIT="${OLD_COMMIT}~1"
-                echo "Processing commit range: ${OLD_COMMIT}..${HEAD_COMMIT}"
-                CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r "${OLD_COMMIT}" "${HEAD_COMMIT}")
-              fi
-            else
-              echo "Processing pull request #$(jq --raw-output .pull_request.number "$GITHUB_EVENT_PATH"): ${BASE_COMMIT}..HEAD"
-              CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r "${BASE_COMMIT}" "HEAD")
-            fi
-
-            if grep -qiP '^\s*%ci:no-build\s*$' <(git log --format="%B" -n 1 "HEAD"); then
-              tar cf artifacts/pkgs-${{ matrix.target_arch }}.tar pkgs
-              echo "[!] Force exiting as tag '%ci:no-build' was applied to HEAD commit message."
-              exit 0
-            fi
-
-            if grep -qP '^scripts/(Dockerfile|properties\.sh|setup-android-sdk\.sh|setup-cgct\.sh|setup-ubuntu\.sh)$' <<< "$CHANGED_FILES"; then
-              echo "Detected changes for environment setup scripts. Building custom Docker image now."
-              docker build -t ghcr.io/termux/package-builder-cgct:latest .
-            fi
-
-            for repo_path in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
+          for pkg in $TARGET_PKGS; do
+            repo_paths=$(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json)
+            found=false
+            for repo_path in $repo_paths; do
               repo=$(jq --raw-output '.["'${repo_path}'"].name' repo.json)
-              while read -r file; do
-                if ! [[ $file == ${repo_path}/* ]]; then
-                  continue
-                fi
-                if [[ $file =~ ^${repo_path}/([.a-z0-9+-]*)/([.a-z0-9+-]*).subpackage.sh$ ]]; then
-                  pkg=${BASH_REMATCH[1]}
-                  subpkg=${BASH_REMATCH[2]}
-                  if grep -qw "$pkg" <<< "$TARGET_PKGS"; then
-                    if [ ! -f "${repo_path}/${pkg}/${subpkg}.subpackage.sh" ]; then
-                      echo "$subpkg" >> ./deleted_${repo}_packages.txt
-                    fi
-                  fi
-                elif [[ $file =~ ^${repo_path}/([.a-z0-9+-]*)/.*$ ]]; then
-                  pkg=${BASH_REMATCH[1]}
-                  if grep -qw "$pkg" <<< "$TARGET_PKGS"; then
-                    if [ -d "${repo_path}/${pkg}" ]; then
-                      echo "$pkg" >> ./built_${repo}_packages.txt
-                      for subfile in $(find "${repo_path}/${pkg}/" -maxdepth 1 -type f -name \*.subpackage.sh | sort); do
-                        echo "$(basename "${subfile%%.subpackage.sh}")" >> ./built_${repo}_subpackages.txt
-                      done
-                    else
-                      echo "$pkg" >> ./deleted_${repo}_packages.txt
-                    fi
-                  fi
-                fi
-              done <<< "${CHANGED_FILES}"
+              if [ -d "${repo_path}/${pkg}" ]; then
+                found=true
+                echo "$pkg" >> ./built_${repo}_packages.txt
+                for subpkg in $(find "${repo_path}/${pkg}/" -maxdepth 1 -type f -name \*.subpackage.sh | sort); do
+                  echo "$(basename "${subpkg%%.subpackage.sh}")" >> ./built_${repo}_subpackages.txt
+                done
+              fi
             done
-          else
-            for pkg in $TARGET_PKGS; do
-              repo_paths=$(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json)
-              found=false
-              for repo_path in $repo_paths; do
-                repo=$(jq --raw-output '.["'${repo_path}'"].name' repo.json)
-                if [ -d "${repo_path}/${pkg}" ]; then
-                  found=true
-                  echo "$pkg" >> ./built_${repo}_packages.txt
-                  for subpkg in $(find "${repo_path}/${pkg}/" -maxdepth 1 -type f -name \*.subpackage.sh | sort); do
-                    echo "$(basename "${subpkg%%.subpackage.sh}")" >> ./built_${repo}_subpackages.txt
-                  done
-                fi
-              done
-            done
-          fi
+          done
 
           for repo in $(jq --raw-output 'del(.pkg_format) | .[].name' repo.json); do
             if [ -f ./built_${repo}_packages.txt ]; then
@@ -211,7 +151,7 @@ jobs:
       - name: Install pacman utilities
         run: |
           sudo apt update
-          sudo apt install -y pacman-package-manager jq
+          sudo apt install -y pacman-package-manager jq libarchive-tools xz-utils
 
       - name: Get *.pkg.* files
         uses: actions/download-artifact@v8.0.1
