@@ -111,8 +111,7 @@ jobs:
             done
           else
             for pkg in $TARGET_PKGS; do
-              repo_paths=$(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json)
-              for repo_path in $repo_paths; do
+              for repo_path in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
                 repo=$(jq --raw-output '.["'${repo_path}'"].name' repo.json)
                 if [ -d "${repo_path}/${pkg}" ]; then
                   echo "$pkg" >> ./built_${repo}_packages.txt
@@ -126,15 +125,15 @@ jobs:
 
           for repo in $(jq --raw-output 'del(.pkg_format) | .[].name' repo.json); do
             if [ -f ./built_${repo}_packages.txt ]; then
-              sort ./built_${repo}_packages.txt | uniq > ./built_${repo}_packages.txt.tmp
+              awk '!seen[$0]++' ./built_${repo}_packages.txt > ./built_${repo}_packages.txt.tmp
               mv ./built_${repo}_packages.txt.tmp ./built_${repo}_packages.txt
             fi
             if [ -f ./built_${repo}_subpackages.txt ]; then
-              sort ./built_${repo}_subpackages.txt | uniq > ./built_${repo}_subpackages.txt.tmp
+              awk '!seen[$0]++' ./built_${repo}_subpackages.txt > ./built_${repo}_subpackages.txt.tmp
               mv ./built_${repo}_subpackages.txt.tmp ./built_${repo}_subpackages.txt
             fi
             if [ -f ./deleted_${repo}_packages.txt ]; then
-              sort ./deleted_${repo}_packages.txt | uniq > ./deleted_${repo}_packages.txt.tmp
+              awk '!seen[$0]++' ./deleted_${repo}_packages.txt > ./deleted_${repo}_packages.txt.tmp
               mv ./deleted_${repo}_packages.txt.tmp ./deleted_${repo}_packages.txt
             fi
           done
@@ -150,18 +149,28 @@ jobs:
           done
 
           if [ ! -z "$packages" ]; then
+            needs_host_env=false
             if grep -qP "(^|\s)${packages// /($|\s)|(^|\s)}($|\s)" ./big-pkgs.list; then
+              needs_host_env=true
               ./scripts/setup-ubuntu.sh
               ./scripts/setup-cgct.sh
-              sudo apt install ninja-build
+              sudo apt install -y ninja-build
               sudo apt purge -yq $(dpkg -l | grep '^ii' | awk '{ print $2 }' | grep -P '(aspnetcore|cabal-|dotnet-|ghc-|libmono|php)') \
-                firefox google-chrome-stable microsoft-edge-stable mono-runtime-common monodoc-manual ruby
-              sudo apt autoremove -yq
-              sudo rm -fr /opt/hostedtoolcache /usr/share/dotnet /usr/share/swift
-              NDK=$ANDROID_NDK_LATEST_HOME ANDROID_HOME=$ANDROID_SDK_ROOT ./build-package.sh -I -a ${{ matrix.target_arch }} --format pacman --library glibc $packages
-            else
-              TERMUX_BUILDER_IMAGE_NAME="ghcr.io/termux/package-builder-cgct" ./scripts/run-docker.sh ./build-package.sh -I -a ${{ matrix.target_arch }} --format pacman --library glibc $packages
+                firefox google-chrome-stable microsoft-edge-stable mono-runtime-common monodoc-manual ruby || true
+              sudo apt autoremove -yq || true
+              sudo rm -fr /opt/hostedtoolcache /usr/share/dotnet /usr/share/swift || true
             fi
+
+            for pkg in $packages; do
+              echo "=========================================="
+              echo ">>> Compiling package: $pkg"
+              echo "=========================================="
+              if [ "$needs_host_env" = true ] && grep -qP "(^|\s)${pkg}($|\s)" ./big-pkgs.list; then
+                NDK=$ANDROID_NDK_LATEST_HOME ANDROID_HOME=$ANDROID_SDK_ROOT ./build-package.sh -I -f -a ${{ matrix.target_arch }} --format pacman --library glibc "$pkg"
+              else
+                TERMUX_BUILDER_IMAGE_NAME="ghcr.io/termux/package-builder-cgct" ./scripts/run-docker.sh ./build-package.sh -I -f -a ${{ matrix.target_arch }} --format pacman --library glibc "$pkg"
+              fi
+            done
           fi
 
       - name: Generate build artifacts
@@ -172,11 +181,13 @@ jobs:
             test -f ./built_${repo}_subpackages.txt && cat ./built_${repo}_subpackages.txt >> ./pkgs/built_${repo}_packages.txt \
               && rm ./built_${repo}_subpackages.txt
             test -f ./deleted_${repo}_packages.txt && mv ./deleted_${repo}_packages.txt ./pkgs/
-
-            while read -r pkg; do
-              find output \( -name "${pkg}-*.pkg.*" -o -name "${pkg}_*.pkg.*" -o -name "${pkg}*.pkg.*" \) -type f -print0 | xargs -0r mv -t pkgs/
-            done < <(cat ./pkgs/built_${repo}_packages.txt)
           done
+
+          if [ -d output ]; then
+            echo "[*] Files in output/:"
+            ls -la output/
+            find output -type f -name "*.pkg.*" -exec mv -t pkgs/ {} +
+          fi
 
           tar cf artifacts/pkgs-${{ matrix.target_arch }}-${{ github.sha }}.tar pkgs
 
@@ -329,5 +340,20 @@ jobs:
               aws s3 cp "$REPO_DIR/${repo}.db.tar.gz" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.arch }}/${repo}.db"
               aws s3 cp "$REPO_DIR/${repo}.files.tar.gz" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.arch }}/${repo}.files"
               aws s3 cp "$REPO_DIR/${repo}.json" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.arch }}/${repo}.json"
+
+              cp -f "$REPO_DIR/${repo}.db.tar.gz" "$REPO_DIR/${repo}.db"
+              cp -f "$REPO_DIR/${repo}.files.tar.gz" "$REPO_DIR/${repo}.files"
+            fi
+
+            mkdir -p "dist/${repo}/${{ matrix.arch }}"
+            if [ -d "$REPO_DIR" ]; then
+              cp -rf "$REPO_DIR"/* "dist/${repo}/${{ matrix.arch }}/"
             fi
           done
+
+      - name: Upload gpkg directory to artifacts
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: gpkg-${{ matrix.arch }}-${{ github.sha }}
+          path: dist/
