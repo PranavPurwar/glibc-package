@@ -296,7 +296,7 @@ jobs:
             shopt -u nullglob
 
             if [[ "$db_updated" = true ]] || [[ -f "pkgs/$dp_file" && -f "$REPO_DIR/${repo}.db.tar.gz" ]]; then
-              python3 -c '
+              python3 -c 'import sys, textwrap; code = sys.argv.pop(1); exec(textwrap.dedent(code))' '
               import os, sys, tarfile, json
               repo_dir, repo = sys.argv[1], sys.argv[2]
               db_path = os.path.join(repo_dir, f"{repo}.db.tar.gz")
