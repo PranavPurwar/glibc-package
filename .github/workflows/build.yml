@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'gpkg/**'
+  pull_request:
+    paths:
+      - 'gpkg/**'
   workflow_dispatch:
 
 permissions: {}
@@ -41,25 +46,77 @@ jobs:
 
       - name: Gather build summary
         run: |
-          TARGET_PKGS="glibc coreutils bash ncurses libarchive liblzma ca-certificates libgpg-error libidn2 libssh2 libnghttp2 libseccomp libsqlite libgcrypt libcurl"
-
           mkdir -p ./artifacts ./pkgs
           touch ./pkgs/.placeholder
 
-          for pkg in $TARGET_PKGS; do
-            repo_paths=$(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json)
-            found=false
-            for repo_path in $repo_paths; do
-              repo=$(jq --raw-output '.["'${repo_path}'"].name' repo.json)
-              if [ -d "${repo_path}/${pkg}" ]; then
-                found=true
-                echo "$pkg" >> ./built_${repo}_packages.txt
-                for subpkg in $(find "${repo_path}/${pkg}/" -maxdepth 1 -type f -name \*.subpackage.sh | sort); do
-                  echo "$(basename "${subpkg%%.subpackage.sh}")" >> ./built_${repo}_subpackages.txt
-                done
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_COMMIT=$(jq --raw-output .pull_request.base.sha "$GITHUB_EVENT_PATH")
+            OLD_COMMIT=$(jq --raw-output .commits[0].id "$GITHUB_EVENT_PATH")
+            HEAD_COMMIT=$(jq --raw-output .commits[-1].id "$GITHUB_EVENT_PATH")
+            if [ "$BASE_COMMIT" = "null" ]; then
+              if [ "$OLD_COMMIT" = "$HEAD_COMMIT" ]; then
+                echo "Processing commit: ${HEAD_COMMIT}"
+                CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r "${HEAD_COMMIT}")
+              else
+                OLD_COMMIT="${OLD_COMMIT}~1"
+                echo "Processing commit range: ${OLD_COMMIT}..${HEAD_COMMIT}"
+                CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r "${OLD_COMMIT}" "${HEAD_COMMIT}")
               fi
+            else
+              echo "Processing pull request #$(jq --raw-output .pull_request.number "$GITHUB_EVENT_PATH"): ${BASE_COMMIT}..HEAD"
+              CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r "${BASE_COMMIT}" "HEAD")
+            fi
+
+            if grep -qiP '^\s*%ci:no-build\s*$' <(git log --format="%B" -n 1 "HEAD"); then
+              tar cf artifacts/pkgs-${{ matrix.target_arch }}.tar pkgs
+              echo "[!] Force exiting as tag '%ci:no-build' was applied to HEAD commit message."
+              exit 0
+            fi
+
+            if grep -qP '^scripts/(Dockerfile|properties\.sh|setup-android-sdk\.sh|setup-cgct\.sh|setup-ubuntu\.sh)$' <<< "$CHANGED_FILES"; then
+              echo "Detected changes for environment setup scripts. Building custom Docker image now."
+              docker build -t ghcr.io/termux/package-builder-cgct:latest .
+            fi
+
+            for repo_path in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
+              repo=$(jq --raw-output '.["'${repo_path}'"].name' repo.json)
+              while read -r file; do
+                if ! [[ $file == ${repo_path}/* ]]; then
+                  continue
+                fi
+                if [[ $file =~ ^${repo_path}/([.a-z0-9+-]*)/([.a-z0-9+-]*).subpackage.sh$ ]]; then
+                  pkg=${BASH_REMATCH[1]}
+                  subpkg=${BASH_REMATCH[2]}
+                  if [ ! -f "${repo_path}/${pkg}/${subpkg}.subpackage.sh" ]; then
+                    echo "$subpkg" >> ./deleted_${repo}_packages.txt
+                  fi
+                elif [[ $file =~ ^${repo_path}/([.a-z0-9+-]*)/.*$ ]]; then
+                  pkg=${BASH_REMATCH[1]}
+                  if [ -d "${repo_path}/${pkg}" ]; then
+                    echo "$pkg" >> ./built_${repo}_packages.txt
+                    for subfile in $(find "${repo_path}/${pkg}/" -maxdepth 1 -type f -name \*.subpackage.sh | sort); do
+                      echo "$(basename "${subfile%%.subpackage.sh}")" >> ./built_${repo}_subpackages.txt
+                    done
+                  else
+                    echo "$pkg" >> ./deleted_${repo}_packages.txt
+                  fi
+                fi
+              done <<< "${CHANGED_FILES}"
             done
-          done
+          else
+            for repo_path in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
+              repo=$(jq --raw-output '.["'${repo_path}'"].name' repo.json)
+              for pkgdir in "${repo_path}"/*; do
+                if [ -d "$pkgdir" ]; then
+                  pkg=$(basename "$pkgdir")
+                  echo "$pkg" >> ./built_${repo}_packages.txt
+                  for subpkg in $(find "${pkgdir}/" -maxdepth 1 -type f -name \*.subpackage.sh | sort); do
+                    echo "$(basename "${subpkg%%.subpackage.sh}")" >> ./built_${repo}_subpackages.txt
+                  done
+                fi
+              done
+            done
+          fi
 
           for repo in $(jq --raw-output 'del(.pkg_format) | .[].name' repo.json); do
             if [ -f ./built_${repo}_packages.txt ]; then
@@ -151,7 +208,7 @@ jobs:
       - name: Install pacman utilities
         run: |
           sudo apt update
-          sudo apt install -y pacman-package-manager jq libarchive-tools xz-utils
+          sudo apt install -y pacman-package-manager jq libarchive-tools xz-utils python3
 
       - name: Get *.pkg.* files
         uses: actions/download-artifact@v8.0.1
@@ -203,13 +260,10 @@ jobs:
               PKG_PATH="$REPO_DIR/$PKG_BASENAME"
               cp -f "$list_pkg" "$REPO_DIR/"
 
-              # Check if .PKGINFO is strictly at root (not ./.PKGINFO)
               if ! bsdtar -tf "$PKG_PATH" 2>/dev/null | grep -E '^(\./)?\.PKGINFO$' | grep -q '^\.PKGINFO$'; then
-                echo "[*] Fixing .PKGINFO entry for $PKG_BASENAME..."
                 EXTRACT_DIR=$(mktemp -d)
                 bsdtar -xf "$PKG_PATH" -C "$EXTRACT_DIR"
 
-                # If .PKGINFO didn't exist at all, generate it
                 if [ ! -f "$EXTRACT_DIR/.PKGINFO" ]; then
                   RAW_NAME=$(basename "$PKG_BASENAME" .pkg.tar.xz)
                   RAW_NAME=$(basename "$RAW_NAME" .pkg.tar.zst)
@@ -224,23 +278,61 @@ jobs:
                     "$PKG_NAME" "$PKG_VER" "$PKG_REL" "$PKG_NAME" "$PKG_ARCH" "$(stat -c%s "$PKG_PATH")" "$(date +%s)" > "$EXTRACT_DIR/.PKGINFO"
                 fi
 
-                # Repack using bsdtar without leading './'
                 ( cd "$EXTRACT_DIR" && bsdtar -cf - * .PKGINFO 2>/dev/null || bsdtar -cf - * ) | xz -c > "$PKG_PATH"
                 rm -rf "$EXTRACT_DIR"
               fi
 
               aws s3 cp "$PKG_PATH" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.arch }}/$PKG_BASENAME"
-              
-              # Run repo-add with absolute path
               repo-add -R "$REPO_DIR/${repo}.db.tar.gz" "$PKG_PATH"
               db_updated=true
             done
             shopt -u nullglob
 
             if [[ "$db_updated" = true ]] || [[ -f "pkgs/$dp_file" && -f "$REPO_DIR/${repo}.db.tar.gz" ]]; then
+              python3 -c '
+              import os, sys, tarfile, json
+
+              repo_dir = sys.argv[1]
+              repo = sys.argv[2]
+              db_path = os.path.join(repo_dir, f"{repo}.db.tar.gz")
+              out_json = os.path.join(repo_dir, f"{repo}.json")
+              repo_data = {}
+
+              if os.path.exists(db_path):
+                  with tarfile.open(db_path, "r:gz") as tar:
+                      for member in tar.getmembers():
+                          if member.name.endswith("/desc"):
+                              f = tar.extractfile(member)
+                              if not f:
+                                  continue
+                              content = f.read().decode("utf-8", errors="ignore").splitlines()
+                              pkg = {}
+                              key = None
+                              for line in content:
+                                  line = line.strip()
+                                  if line.startswith("%") and line.endswith("%"):
+                                      key = line[1:-1]
+                                      pkg[key] = []
+                                  elif line and key:
+                                      pkg[key].append(line)
+
+                              name = pkg.get("NAME", [""])[0]
+                              if name:
+                                  entry = {}
+                                  for k, v in pkg.items():
+                                      if k == "NAME":
+                                          continue
+                                      entry[k] = v[0] if len(v) == 1 else v
+                                  repo_data[name] = entry
+
+              with open(out_json, "w", encoding="utf-8") as jf:
+                  json.dump(repo_data, jf, indent=2)
+              ' "$REPO_DIR" "${repo}"
+
               aws s3 cp "$REPO_DIR/${repo}.db.tar.gz" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.arch }}/${repo}.db.tar.gz"
               aws s3 cp "$REPO_DIR/${repo}.files.tar.gz" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.arch }}/${repo}.files.tar.gz"
               aws s3 cp "$REPO_DIR/${repo}.db.tar.gz" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.arch }}/${repo}.db"
               aws s3 cp "$REPO_DIR/${repo}.files.tar.gz" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.arch }}/${repo}.files"
+              aws s3 cp "$REPO_DIR/${repo}.json" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.arch }}/${repo}.json"
             fi
           done
