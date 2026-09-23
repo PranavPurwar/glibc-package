@@ -139,13 +139,16 @@ jobs:
           done
 
           if [ ! -z "$packages" ]; then
+            packages=$(./scripts/buildorder.py $packages)
+            echo "Optimized build order: $packages"
+
             if grep -qP "(^|\s)${packages// /($|\s)|(^|\s)}($|\s)" ./big-pkgs.list; then
               ./scripts/setup-ubuntu.sh
               ./scripts/setup-cgct.sh
               sudo apt install -y ninja-build
-              NDK=$ANDROID_NDK_LATEST_HOME ANDROID_HOME=$ANDROID_SDK_ROOT ./build-package.sh -I -f -a ${{ matrix.target_arch }} --format pacman --library glibc $packages
+              NDK=$ANDROID_NDK_LATEST_HOME ANDROID_HOME=$ANDROID_SDK_ROOT ./build-package.sh -I -f -s -a ${{ matrix.target_arch }} --format pacman --library glibc $packages
             else
-              TERMUX_BUILDER_IMAGE_NAME="ghcr.io/termux/package-builder-cgct" ./scripts/run-docker.sh ./build-package.sh -I -f -a ${{ matrix.target_arch }} --format pacman --library glibc $packages
+              TERMUX_BUILDER_IMAGE_NAME="ghcr.io/termux/package-builder-cgct" ./scripts/run-docker.sh ./build-package.sh -I -f -s -a ${{ matrix.target_arch }} --format pacman --library glibc $packages
             fi
           fi
 
