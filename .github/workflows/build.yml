@@ -134,7 +134,6 @@ jobs:
           for repo_path in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
             repo=$(jq --raw-output '.["'${repo_path}'"].name' repo.json)
             if [ -f ./built_${repo}_packages.txt ]; then
-              # Prepend the repo path to the package name so buildorder.py can find it
               for pkg in $(cat ./built_${repo}_packages.txt); do
                 packages="$packages ${repo_path}/${pkg}"
               done
@@ -142,20 +141,43 @@ jobs:
           done
 
           if [ ! -z "$packages" ]; then
-            # 1. Sort using the full paths (e.g. gpkg/glibc gpkg/coreutils)
-            packages=$(./scripts/buildorder.py $packages)
+            # 1. Collect ALL package directories across all custom repos
+            shopt -s nullglob
+            ALL_DIRS=""
+            for repo_path in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
+              if [ -d "$repo_path" ]; then
+                ALL_DIRS="$ALL_DIRS $repo_path"/*
+              fi
+            done
+            shopt -u nullglob
+            
+            # 2. Let buildorder.py resolve the full dependency graph across all known directories
+            SORTED_ALL=$(./scripts/buildorder.py $ALL_DIRS)
+            
+            # 3. Filter the sorted graph to only keep the packages we actually need to build
+            SORTED_PACKAGES=""
+            for p in $SORTED_ALL; do
+              for target in $packages; do
+                if [ "$p" = "$target" ]; then
+                  SORTED_PACKAGES="$SORTED_PACKAGES $p"
+                  break
+                fi
+              done
+            done
+            packages="$SORTED_PACKAGES"
             echo "Optimized build order: $packages"
 
-            # 2. Extract just the package names (strip the path) for the grep check
+            # 4. Extract just the package names (strip the path) for the grep check
             pkg_names=$(for p in $packages; do basename "$p"; done | tr '\n' ' ')
 
             if grep -qP "(^|\s)${pkg_names// /($|\s)|(^|\s)}($|\s)" ./big-pkgs.list; then
               ./scripts/setup-ubuntu.sh
               ./scripts/setup-cgct.sh
               sudo apt install -y ninja-build
-              NDK=$ANDROID_NDK_LATEST_HOME ANDROID_HOME=$ANDROID_SDK_ROOT ./build-package.sh -I -f -s -a ${{ matrix.target_arch }} --format pacman --library glibc $packages
+              # REMOVED -s: The perfect build order allows build-package.sh to extract dependencies from output/
+              NDK=$ANDROID_NDK_LATEST_HOME ANDROID_HOME=$ANDROID_SDK_ROOT ./build-package.sh -I -f -a ${{ matrix.target_arch }} --format pacman --library glibc $packages
             else
-              TERMUX_BUILDER_IMAGE_NAME="ghcr.io/termux/package-builder-cgct" ./scripts/run-docker.sh ./build-package.sh -I -f -s -a ${{ matrix.target_arch }} --format pacman --library glibc $packages
+              TERMUX_BUILDER_IMAGE_NAME="ghcr.io/termux/package-builder-cgct" ./scripts/run-docker.sh ./build-package.sh -I -f -a ${{ matrix.target_arch }} --format pacman --library glibc $packages
             fi
           fi
 
