@@ -281,6 +281,7 @@ jobs:
               aws s3 cp "$REPO_DIR/${repo}.json" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.target_arch }}/${repo}.json" &
               wait
 
+              rm -f "$REPO_DIR/${repo}.db" "$REPO_DIR/${repo}.files"
               cp "$REPO_DIR/${repo}.db.tar.gz" "$REPO_DIR/${repo}.db"
               cp "$REPO_DIR/${repo}.files.tar.gz" "$REPO_DIR/${repo}.files"
             fi
