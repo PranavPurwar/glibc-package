@@ -134,15 +134,22 @@ jobs:
           for repo_path in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
             repo=$(jq --raw-output '.["'${repo_path}'"].name' repo.json)
             if [ -f ./built_${repo}_packages.txt ]; then
-              packages="$packages $(cat ./built_${repo}_packages.txt)"
+              # Prepend the repo path to the package name so buildorder.py can find it
+              for pkg in $(cat ./built_${repo}_packages.txt); do
+                packages="$packages ${repo_path}/${pkg}"
+              done
             fi
           done
 
           if [ ! -z "$packages" ]; then
+            # 1. Sort using the full paths (e.g. gpkg/glibc gpkg/coreutils)
             packages=$(./scripts/buildorder.py $packages)
             echo "Optimized build order: $packages"
 
-            if grep -qP "(^|\s)${packages// /($|\s)|(^|\s)}($|\s)" ./big-pkgs.list; then
+            # 2. Extract just the package names (strip the path) for the grep check
+            pkg_names=$(for p in $packages; do basename "$p"; done | tr '\n' ' ')
+
+            if grep -qP "(^|\s)${pkg_names// /($|\s)|(^|\s)}($|\s)" ./big-pkgs.list; then
               ./scripts/setup-ubuntu.sh
               ./scripts/setup-cgct.sh
               sudo apt install -y ninja-build
