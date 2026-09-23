@@ -41,18 +41,7 @@ jobs:
           fetch-depth: 1000
 
       - name: Set up QEMU
-        # Only strictly necessary on x86_64 runners cross-compiling, or for 32-bit ARM on ARM64
-        run: |
-          while true; do
-            {
-              sudo apt update
-              yes | sudo apt install qemu-user qemu-user-static binfmt-support
-            } || continue
-            break
-          done
-          sudo update-binfmts --enable qemu-aarch64
-          sudo update-binfmts --enable qemu-arm
-          docker run --rm --privileged tonistiigi/binfmt --install all
+        uses: docker/setup-qemu-action@v3
 
       - name: Get files from termux-packages repository
         run: ./get-build-package.sh
@@ -154,7 +143,6 @@ jobs:
               ./scripts/setup-ubuntu.sh
               ./scripts/setup-cgct.sh
               sudo apt install -y ninja-build
-              # REMOVED: Expensive apt purge and disk cleanup step. Add back only if runners hit ENOSPC.
               NDK=$ANDROID_NDK_LATEST_HOME ANDROID_HOME=$ANDROID_SDK_ROOT ./build-package.sh -I -f -a ${{ matrix.target_arch }} --format pacman --library glibc $packages
             else
               TERMUX_BUILDER_IMAGE_NAME="ghcr.io/termux/package-builder-cgct" ./scripts/run-docker.sh ./build-package.sh -I -f -a ${{ matrix.target_arch }} --format pacman --library glibc $packages
@@ -175,7 +163,6 @@ jobs:
             find output -type f -name "*.pkg.*" -exec mv -t pkgs/ {} +
           fi
           
-          # Checksums
           find pkgs -type f -name "*.pkg.*" -exec sha256sum "{}" \; | sort -k2
 
           tar cf artifacts/pkgs-${{ matrix.target_arch }}-${{ github.sha }}.tar pkgs
@@ -254,7 +241,7 @@ jobs:
               repo-add -R "$REPO_DIR/${repo}.db.tar.gz" "$PKG_PATH"
               db_updated=true
             done
-            wait # Wait for all S3 concurrent package uploads
+            wait # Wait for all S3 package uploads
             shopt -u nullglob
 
             if [[ "$db_updated" = true ]] || [[ -f "pkgs/$dp_file" && -f "$REPO_DIR/${repo}.db.tar.gz" ]]; then
@@ -287,7 +274,6 @@ jobs:
                   json.dump(repo_data, jf, indent=2)
               ' "$REPO_DIR" "${repo}"
 
-              # Parallelize final repo index uploads
               aws s3 cp "$REPO_DIR/${repo}.db.tar.gz" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.target_arch }}/${repo}.db.tar.gz" &
               aws s3 cp "$REPO_DIR/${repo}.files.tar.gz" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.target_arch }}/${repo}.files.tar.gz" &
               aws s3 cp "$REPO_DIR/${repo}.db.tar.gz" "s3://${{ secrets.TIGRIS_BUCKET_NAME }}/${repo}/${{ matrix.target_arch }}/${repo}.db" &
